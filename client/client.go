@@ -1,309 +1,163 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
 	"os"
-	"os/signal"
 	"strings"
-	"sync"
-	"syscall"
-	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/charmbracelet/bubbles/help"
+	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/viewport"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
-type Message struct {
-	Type string
-	Data interface{}
-}
+var CONNECTION *websocket.Conn
 
 type User struct {
-	Name     string
-	Password string
-	Conn     *websocket.Conn
-	Chatting bool
+    Name     string
+    Password string
+    Conn     string //*websocket.Conn
+    Chatting bool
 }
 
-var input = make(chan string, 1)
-var exit = make(chan os.Signal, 1)
-var chatting = make(chan bool, 1)
-var message = make(chan Message, 1)
-
-var conn *websocket.Conn
-var mate string
-var OnlineUsers string
-var PS1 = "GoChat> "
-var cls = "^<ESC^>[2K\r" // clear line
-
-func ping(conn *websocket.Conn) {
-	for {
-		if conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(5 * time.Second)) != nil {
-			fmt.Print("Connection timeout\n")
-			exit <- syscall.SIGQUIT
-		}
-		time.Sleep(3 * time.Minute)
+type Keymap struct {
+    help key.Binding
+    login key.Binding
+    register key.Binding
+    invite key.Binding
+    quit key.Binding
+}
+func (k Keymap) ShortHelp() []key.Binding {
+	return []key.Binding{k.help, k.quit}
+}
+func (k Keymap) FullHelp() [][]key.Binding {
+	return [][]key.Binding{
+		{k.login, k.register, k.invite}, // first column
+		{k.help, k.quit},                // second column
 	}
 }
 
-func C(err error) {
-	if err != nil {
-		panic(err)
-	}
+type model struct {
+    keymap      Keymap
+    help        help.Model
+    user        User
+    viewArea    viewport.Model
+    messages    []string
+    senderStyle lipgloss.Style
+    inputArea   textarea.Model
+    quitting    bool
 }
+func (m model) Init() tea.Cmd {
+    return textarea.Blink
+}
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+    var (
+		iaCmd tea.Cmd
+		vaCmd tea.Cmd
+	)
 
-func read(conn *websocket.Conn) {
-	var msg Message
-	for {
-		if conn.ReadJSON(&msg) != nil {
-			fmt.Print(cls, "Error reading from server: ", msg, "\n")
-			exit <- syscall.SIGQUIT
-		}
+	m.inputArea, iaCmd = m.inputArea.Update(msg)
+	m.viewArea, vaCmd = m.viewArea.Update(msg)
+
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
 		switch msg.Type {
-		case "ServerStop":
-			fmt.Print(cls, "Server stopped by admin.\n")
-			exit <- syscall.SIGQUIT
-		case "MateClosed":
-			fmt.Println("\nYour mate exited chat")
-			exit <- syscall.SIGQUIT
-		case "Crash":
-			fmt.Println("\nYour connection crashed.")
-			exit <- syscall.SIGQUIT
-		default:
-			message <- msg
+		case tea.KeyCtrlC, tea.KeyEsc:
+			fmt.Println(m.inputArea.Value())
+			return m, tea.Quit
+		case tea.KeyEnter:
+			m.messages = append(m.messages, m.senderStyle.Render("You: ")+m.inputArea.Value())
+			m.viewArea.SetContent(strings.Join(m.messages, "\n"))
+			m.inputArea.Reset()
+			m.viewArea.GotoBottom()
 		}
 	}
-}
 
-func send(Type string, Data ...interface{}) {
-	var err error
-	if len(Data) == 0 {
-		err = conn.WriteJSON(Message{Type: Type})
-	} else {
-		err = conn.WriteJSON(Message{Type: Type, Data: Data[0]})
+	/* We handle errors just like any other message
+	case errMsg:
+		m.err = msg
+		return m, nil
+	}*/
+
+	return m, tea.Batch(iaCmd, vaCmd)
+}
+func (m model) View() string {
+    return fmt.Sprintf(
+		"%s\n\n%s",
+		m.viewArea.View(),
+		m.inputArea.View(),
+	) + "\n\n" + m.help.ShortHelpView([]key.Binding{
+        m.keymap.login,
+        m.keymap.register,
+        m.keymap.invite,
+    })
+}
+func initialModel(init_user User) model {
+	ia := textarea.New()
+	ia.Placeholder = "your input here"
+	ia.Prompt = "> "
+	ia.CharLimit = 128
+	ia.SetHeight(1)
+	ia.Focus()
+
+	ia.FocusedStyle.CursorLine = lipgloss.NewStyle()
+	ia.ShowLineNumbers = false
+	ia.KeyMap.InsertNewline.SetEnabled(false)
+
+	va := viewport.New(60,5)
+	va.SetContent("still empty")
+
+	return model{
+		keymap: Keymap{
+			help: key.NewBinding(
+				key.WithKeys("h"),
+				key.WithHelp("h", "help"),
+			),
+			login: key.NewBinding(
+				key.WithKeys("l"),
+				key.WithHelp("l", "login"),
+			),
+			register: key.NewBinding(
+				key.WithKeys("r"),
+				key.WithHelp("r", "register"),
+			),
+			invite: key.NewBinding(
+				key.WithKeys("i"),
+				key.WithHelp("i", "invite"),
+			),
+			quit: key.NewBinding(
+				key.WithKeys("ctrl+c", "q"),
+				key.WithHelp("q", "quit"),
+			),
+		},
+		help:      help.New(),
+    	user:      init_user,
+    	viewArea:  va,
+    	messages:  []string{},
+    	senderStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("5")),
+    	inputArea: ia,
+    	quitting:  false,
 	}
-	if err != nil {
-		fmt.Print("Error sending to server.", err, "\n")
-		exit <- syscall.SIGQUIT
-	}
 }
-
-func print(s any) {
-	fmt.Print(cls, s, "\n", PS1)
-}
-
-func signals() {
-	signal.Notify(exit, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
-	call := <-exit
-	send("Close")
-	switch call {
-	case syscall.SIGQUIT:
-		fmt.Print(cls, "Bye!\n")
-	default:
-		fmt.Print(cls, "\nBye!\n")
-	}
-	os.Exit(0)
-}
-
-func ReadInput() {
-	scanner := bufio.NewScanner(os.Stdin)
-	for scanner.Scan() {
-		text := scanner.Text()
-		switch text {
-		case "h", "help":
-			print("Short\tLong\n\nLogin:\nl\tlogin\nr\tregister\nInvite:\no\tonline\ni\tinvite\nAlways:\ne\texit\n")
-		case "e", "exit", "quit":
-			exit <- syscall.SIGQUIT
-		case "":
-			fmt.Print(PS1)
-		default:
-			input <- text
-		}
-	}
-	C(scanner.Err())
-}
-
-func login(wg *sync.WaitGroup) bool {
-	defer wg.Done()
-	inp := <-input
-	switch inp {
-	case "l", "login", "r", "reg", "register":
-		fmt.Print("Write your name: ")
-		name := <-input
-		fmt.Print("Write your password: ")
-		pass := <-input
-		fmt.Print("\033[1A")
-		if inp == "l" || inp == "login" {
-			send("Login", []string{name, pass})
-		} else {
-			send("Register", []string{name, pass})
-		}
-		msg := <-message
-		switch msg.Type {
-		case "Logged":
-			PS1 = "GoChat " + name + "> "
-			return false
-		case "UserNotFound":
-			print("User not found")
-		case "WrongPassword":
-			print("Wrong password")
-		case "AlreadyOnline":
-			print("User already online")
-		case "Registered":
-			PS1 = "GoChat " + name + "> "
-			return false
-		case "UserExist":
-			print("User already exists.")
-		default:
-			print("error msg type " + msg.Type)
-		}
-	case "i", "invite", "o", "online":
-		print("You're not logged in")
-	default:
-		print("No such command")
-	}
-	return true
-}
-
-func dialup(wg *sync.WaitGroup) { // enter chat with another user
-	defer wg.Done()
-	var stop_input = make(chan bool)
-
-	go func() { // read
-		for msg := range message {
-			switch msg.Type {
-			case "InviteSent":
-				fmt.Print("Invite sent\n", PS1)
-			case "InviteRefuse":
-				print(msg.Data.(string) + " refused, you loser")
-			case "UserNotFound":
-				print("User not found")
-			case "UserIsChatting":
-				print("User is chatting")
-			case "InviteRequest":
-				fmt.Print(cls, msg.Data.(string)+" invited you. Accept? (Y/N) ")
-				stop_input <- true
-				inp := <-input
-				switch inp {
-				case "Y", "y", "yes", "Yes":
-					send("InviteCrush", msg.Data)
-					mate = msg.Data.(string)
-					chatting <- true
-					wg.Add(1)
-					go chat(wg)
-					return
-				case "N", "n", "no", "No":
-					send("InvitePass", msg.Data)
-					fmt.Print(PS1)
-				}
-			case "InviteAccept":
-				fmt.Print(cls, msg.Data, " accepted\n")
-				mate = msg.Data.(string)
-				chatting <- true
-				wg.Add(1)
-				go chat(wg)
-				return
-			case "InviteYourself":
-				print("You cannot invite yourself")
-			case "OnlineUsers":
-				OnlineUsers = msg.Data.(string)
-				print("Online users refresh: " + OnlineUsers)
-			default:
-				print("error msg type " + msg.Type)
-			}
-		}
-	}()
-
-	for { // send
-		select {
-		case tmp := <-input:
-			inp := strings.Split(tmp, " ")
-			switch inp[0] {
-			case "i", "invite":
-				if len(inp) < 2 {
-					print("usage: invite [user]")
-				} else {
-					send("Invite", inp[1])
-				}
-			case "r", "register", "l", "login":
-				print("You're already logged in")
-			case "o", "online":
-				fmt.Print(OnlineUsers, "\n", PS1)
-			default:
-				fmt.Print("No such command\n", PS1)
-			}
-		case <-stop_input:
-		case <-chatting:
-			return
-		}
+func initialUser() User {
+	return User{
+    	Name:     "Test",
+    	Password: "123456",
+    	Conn:     "penis",
+    	Chatting: false,
 	}
 }
 
-func chat(wg *sync.WaitGroup) {
-	defer wg.Done()
-	fmt.Print(cls)
-	go func() { // read
-		for msg := range message {
-			switch msg.Type {
-			case "Chat":
-				fmt.Println("\n" + mate+">", msg.Data)
-			case "History":
-				fmt.Println("Your chat history:")
-				fmt.Print(msg.Data)
-			case "OnlineUsers":
-				OnlineUsers = msg.Data.(string)
-				fmt.Print("Online users refresh: ", OnlineUsers, "\n")
-			case "InviteRequest":
-				
-			default:
-				print("error msg type " + msg.Type)
-			}
-		}
-	}()
-
-	for inp := range input { // send
-		send("Chat", inp)
-	}
-}
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Println("Usage: ./gochat [ip:port]")
-		return
-	}
-	var wg sync.WaitGroup
-	var err error
-	f := true
-
-	go signals()
-	go ReadInput()
-
-	print(`
-    +---------------------------------------+
-    |    ____        ____ _           _     |
-    |   / ___| ___  / ___| |__   ____| |_   |
-    |  | |  _ / _ \| |   | '_ \ / _  | __|  |
-    |  | |_| | (_) | |___| | | | (_| | |_   |
-    |   \____|\___/ \____|_| |_|\__,_|\__|  |
-    |                                       |
-    +---------------------------------------+
-	
-      Welcome to GoChat! Press h for help.
-`)
-
-	var addr = "ws://" + os.Args[1] + "/ws"
-	conn, _, err = websocket.DefaultDialer.Dial(addr, nil)
-	C(err)
-	go read(conn)
-	go ping(conn)
-	for f {
-		wg.Add(1)
-		f = login(&wg)
-	}
-	wg.Add(1)
-	dialup(&wg)
-
-	wg.Wait()
-	exit <- syscall.SIGQUIT
-	fmt.Println("Exited.")
+    p := tea.NewProgram(initialModel(initialUser()),tea.WithAltScreen())
+    if err := p.Start(); err != nil {
+    	fmt.Printf("Err: %v", err)
+    	os.Exit(1)
+    }
 }
+
