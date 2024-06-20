@@ -1,19 +1,17 @@
-    +---------------------------------------+
-    |    ____        ____ _           _     |
-    |   / ___| ___  / ___| |__   ____| |_   |
-    |  | |  _ / _ \| |   | '_ \ / _  | __|  |
-    |  | |_| | (_) | |___| | | | (_| | |_   |
-    |   \____|\___/ \____|_| |_|\__,_|\__|  |
-    |                                       |
-    +---------------------------------------+
+ dP""b8 88  88    db    888888 88   88 88 
+dP   `" 88  88   dPYb     88   88   88 88 
+Yb  "88 888888  dP__Yb    88   Y8   8P 88 
+ YboodP 88  88 dP""""Yb   88   `YbodP' 88 
 
-Simple CLI chat, written in 10 days to learn Go and prepare for a backend Go developer interview.
 
-Server usage: <br>
-1 systemctl start postgresql <br>
-2 createdb chat <br>
-3 psql -d chat -a -f ./init-db.sql <br>
-4 ./server [port] <br>
+Simple TUI chat, written from simple CLI chat, written in 10 days to learn GO and prepare for a backend Go developer interview
 
-Client usage: <br>
-1 ./client [ip:port]
+Server usage:
+- systemctl start postgresql
+- createdb chat
+- psql -d chat -a -f ./init-db.sql
+- ./server [port]
+
+Client usage:
+- ./client [ip:port]
+
