@@ -1,22 +1,25 @@
 package main
 
 import (
-	"fmt"
-	"os"
-	"strings"
+    "fmt"
+    "os"
+    "strings"
 
-	"github.com/gorilla/websocket"
+    "github.com/gorilla/websocket"
 
-	"github.com/charmbracelet/bubbles/help"
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+    "github.com/charmbracelet/bubbles/textarea"
+    "github.com/charmbracelet/bubbles/textinput"
+    "github.com/charmbracelet/bubbles/viewport"
+    tea "github.com/charmbracelet/bubbletea"
+)
+
+type state int
+const (
+    stateLogin state = iota
+    stateChat
 )
 
 var CONNECTION *websocket.Conn
-
 type User struct {
     Name     string
     Password string
@@ -24,137 +27,128 @@ type User struct {
     Chatting bool
 }
 
-type Keymap struct {
-    help key.Binding
-    login key.Binding
-    register key.Binding
-    invite key.Binding
-    quit key.Binding
-}
-func (k Keymap) ShortHelp() []key.Binding {
-	return []key.Binding{k.help, k.quit}
-}
-func (k Keymap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{
-		{k.login, k.register, k.invite}, // first column
-		{k.help, k.quit},                // second column
-	}
-}
-
 type model struct {
-    keymap      Keymap
-    help        help.Model
-    user        User
-    viewArea    viewport.Model
-    messages    []string
-    senderStyle lipgloss.Style
-    inputArea   textarea.Model
-    quitting    bool
+    usernameInput textinput.Model
+    passwordInput textinput.Model
+    chatInput     textinput.Model
+    viewArea      viewport.Model
+    messages      []string
+    state         state
+    focusIndex    int
+    quitting      bool
+    err           string
 }
 func (m model) Init() tea.Cmd {
     return textarea.Blink
 }
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-    var (
-		iaCmd tea.Cmd
-		vaCmd tea.Cmd
-	)
-
-	m.inputArea, iaCmd = m.inputArea.Update(msg)
-	m.viewArea, vaCmd = m.viewArea.Update(msg)
-
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch msg.Type {
-		case tea.KeyCtrlC, tea.KeyEsc:
-			fmt.Println(m.inputArea.Value())
-			return m, tea.Quit
-		case tea.KeyEnter:
-			m.messages = append(m.messages, m.senderStyle.Render("You: ")+m.inputArea.Value())
-			m.viewArea.SetContent(strings.Join(m.messages, "\n"))
-			m.inputArea.Reset()
-			m.viewArea.GotoBottom()
+    switch msg := msg.(type) {
+    case tea.KeyMsg:
+        switch msg.Type {
+	case tea.KeyTab:
+	    if m.state == stateLogin {
+	        m.focusIndex++
+	        if m.focusIndex > 1 {
+		    m.focusIndex = 0
+	        }
+	        if m.focusIndex == 0 {
+	            m.usernameInput.Focus()
+		    m.passwordInput.Blur()
+	        } else {
+		    m.usernameInput.Blur()
+		    m.passwordInput.Focus()
+	        }
+	    }
+	case tea.KeyEnter:
+	    if m.state == stateLogin {
+		if m.usernameInput.Value() == validUsername && m.passwordInput.Value() == validPassword {
+		    m.state = stateChat
+		    m.chatInput.Focus()
+		} else {
+		    m.err = "Invalid username or password"
+		    return m, nil
 		}
+	    } else if m.state == stateChat {
+		m.messages = append(m.messages, m.chatInput.Value())
+		m.chatInput.SetValue("")
+	    }
+	case tea.KeyCtrlC, tea.KeyEsc:
+	        return m, tea.Quit
 	}
+    }
 
-	/* We handle errors just like any other message
-	case errMsg:
-		m.err = msg
-		return m, nil
-	}*/
+    switch m.state {
+    case stateLogin:
+	m.usernameInput, _ = m.usernameInput.Update(msg)
+	m.passwordInput, _ = m.passwordInput.Update(msg)
+    case stateChat:
+	m.chatInput, _ = m.chatInput.Update(msg)
+    }
 
-	return m, tea.Batch(iaCmd, vaCmd)
+    return m, nil
 }
 func (m model) View() string {
-    return fmt.Sprintf(
-		"%s\n\n%s",
-		m.viewArea.View(),
-		m.inputArea.View(),
-	) + "\n\n" + m.help.ShortHelpView([]key.Binding{
-        m.keymap.login,
-        m.keymap.register,
-        m.keymap.invite,
-    })
-}
-func initialModel(init_user User) model {
-	ia := textarea.New()
-	ia.Placeholder = "your input here"
-	ia.Prompt = "> "
-	ia.CharLimit = 128
-	ia.SetHeight(1)
-	ia.Focus()
+    var b strings.Builder
 
-	ia.FocusedStyle.CursorLine = lipgloss.NewStyle()
-	ia.ShowLineNumbers = false
-	ia.KeyMap.InsertNewline.SetEnabled(false)
-
-	va := viewport.New(60,5)
-	va.SetContent("still empty")
-
-	return model{
-		keymap: Keymap{
-			help: key.NewBinding(
-				key.WithKeys("h"),
-				key.WithHelp("h", "help"),
-			),
-			login: key.NewBinding(
-				key.WithKeys("l"),
-				key.WithHelp("l", "login"),
-			),
-			register: key.NewBinding(
-				key.WithKeys("r"),
-				key.WithHelp("r", "register"),
-			),
-			invite: key.NewBinding(
-				key.WithKeys("i"),
-				key.WithHelp("i", "invite"),
-			),
-			quit: key.NewBinding(
-				key.WithKeys("ctrl+c", "q"),
-				key.WithHelp("q", "quit"),
-			),
-		},
-		help:      help.New(),
-    	user:      init_user,
-    	viewArea:  va,
-    	messages:  []string{},
-    	senderStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("5")),
-    	inputArea: ia,
-    	quitting:  false,
+    switch m.state {
+    case stateLogin:
+        b.WriteString("Enter your credentials\n\n")
+	b.WriteString(fmt.Sprintf("Username: %s\n", m.usernameInput.View()))
+	b.WriteString(fmt.Sprintf("Password: %s\n", m.passwordInput.View()))
+        if m.err != "" {
+	    b.WriteString(fmt.Sprintf("\nError: %s\n", m.err))
+        }
+    case stateChat:
+	b.WriteString("Chat Room\n\n")
+	for _, msg := range m.messages {
+	    b.WriteString(fmt.Sprintf("%s\n", msg))
 	}
+	b.WriteString("\n")
+	b.WriteString(fmt.Sprintf("Message: %s\n", m.chatInput.View()))
+	b.WriteString("\nPress Ctrl+C to exit.\n")
+    }
+
+    return b.String() 
+}
+func initialModel() model {
+    ui := textinput.New()
+    ui.Placeholder = "Username"
+    ui.Focus()	
+    ui.CharLimit = 32
+    ui.Width = 32
+    ui.Focus()
+
+    pi := textinput.New()
+    pi.Placeholder = "Password"
+    pi.EchoMode = textinput.EchoPassword
+    pi.EchoCharacter = '*'
+    pi.CharLimit = 32
+    pi.Width = 32
+
+    ci := textinput.New()
+    ci.Placeholder = "Type a message"
+    ci.Width = 50
+
+    return model{
+    	usernameInput: ui,
+	passwordInput: pi,
+	chatInput:     ci,
+	state:         stateLogin,
+    	quitting:      false,
+    }
 }
 func initialUser() User {
-	return User{
+    return User{
     	Name:     "Test",
     	Password: "123456",
     	Conn:     "penis",
     	Chatting: false,
-	}
+    }
 }
 
 
 func main() {
-    p := tea.NewProgram(initialModel(initialUser()),tea.WithAltScreen())
+    p := tea.NewProgram(initialModel(), tea.WithAltScreen())
     if err := p.Start(); err != nil {
     	fmt.Printf("Err: %v", err)
     	os.Exit(1)
